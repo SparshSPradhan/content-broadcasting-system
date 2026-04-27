@@ -397,9 +397,26 @@ GET /api/analytics/usage?subject=maths&days=7
 
 ---
 
-## ⚙️ AWS S3 Setup (Bonus Feature)
+## 📦 File Storage Strategy
 
-### Step-by-step S3 setup for beginners:
+- By default, files are stored locally using Multer in the `/uploads` directory.
+- If `USE_S3=true`, files are uploaded to AWS S3 and a public URL is stored.
+- The system supports hybrid storage (local + S3) for flexibility and fallback.
+
+This design allows:
+- Easy local development without AWS setup
+- Seamless migration to cloud storage in production
+
+
+## ⚙️ AWS S3 Setup (Optional / Bonus)
+
+⚠️ Note: S3 is optional. By default, the system uses local file storage (Multer).
+To enable S3, set USE_S3=true and configure AWS credentials.
+
+> ⚠️ Note:
+> This project works fully with local file storage using Multer.
+> AWS S3 integration is provided as an optional extension and is not required to run the system.
+> If S3 is not configured, files are stored locally in the `/uploads` directory.
 
 **1. Create an AWS account** at https://aws.amazon.com
 
