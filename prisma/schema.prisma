@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  principal
+  teacher
+}
+
+enum ContentStatus {
+  uploaded
+  pending
+  approved
+  rejected
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         Role
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  uploadedContent  Content[] @relation("UploadedBy")
+  approvedContent  Content[] @relation("ApprovedBy")
+
+  @@map("users")
+}
+
+model Content {
+  id               String        @id @default(uuid())
+  title            String
+  description      String?
+  subject          String
+  filePath         String        @map("file_path")
+  fileUrl          String?       @map("file_url")
+  fileType         String        @map("file_type")
+  fileSize         Int           @map("file_size")
+  status           ContentStatus @default(uploaded)
+  rejectionReason  String?       @map("rejection_reason")
+  startTime        DateTime?     @map("start_time")
+  endTime          DateTime?     @map("end_time")
+  rotationDuration Int?          @map("rotation_duration")
+  uploadedById     String        @map("uploaded_by")
+  approvedById     String?       @map("approved_by")
+  approvedAt       DateTime?     @map("approved_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  uploadedBy User  @relation("UploadedBy", fields: [uploadedById], references: [id])
+  approvedBy User? @relation("ApprovedBy", fields: [approvedById], references: [id])
+
+  schedules  ContentSchedule[]
+  analytics  ContentAnalytics[]
+
+  @@map("content")
+}
+
+model ContentSlot {
+  id        String   @id @default(uuid())
+  subject   String
+  teacherId String   @map("teacher_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  schedules ContentSchedule[]
+
+  @@unique([subject, teacherId])
+  @@map("content_slots")
+}
+
+model ContentSchedule {
+  id            String   @id @default(uuid())
+  contentId     String   @map("content_id")
+  slotId        String   @map("slot_id")
+  rotationOrder Int      @map("rotation_order")
+  duration      Int
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  content Content     @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  slot    ContentSlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+
+  @@map("content_schedules")
+}
+
+model ContentAnalytics {
+  id         String    @id @default(uuid())
+  contentId  String    @map("content_id")
+  subject    String
+  teacherId  String    @map("teacher_id")
+  viewCount  Int       @default(0) @map("view_count")
+  lastViewed DateTime? @map("last_viewed")
+  date       DateTime  @default(now()) @db.Date
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@unique([contentId, date])
+  @@map("content_analytics")
+}

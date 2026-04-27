@@ -1,0 +1,364 @@
+=========================================================
+  CONTENT BROADCASTING SYSTEM — ARCHITECTURE NOTES
+=========================================================
+
+─────────────────────────────────────────────────────────
+1. AUTHENTICATION & RBAC FLOW
+─────────────────────────────────────────────────────────
+
+AUTH FLOW:
+  1. User POSTs /api/auth/login with email + password
+  2. bcrypt.compare() checks password against stored hash
+  3. On success, JWT is signed with { id, email, role } payload
+  4. Token is returned; client stores it and sends as
+     "Authorization: Bearer <token>" on subsequent requests
+
+TOKEN VERIFICATION (authenticate middleware):
+  1. Extract token from "Authorization" header
+  2. jwt.verify() validates signature and expiry
+  3. User is fetched from DB to confirm they still exist
+  4. req.user = { id, email, role, name } is set
+
+RBAC (authorize middleware):
+  1. After authenticate, authorize(...roles) checks req.user.role
+  2. Roles: 'principal' | 'teacher'
+  3. Mismatched role → 403 Forbidden
+  4. Convenience exports: isPrincipal, isTeacher, isPrincipalOrTeacher
+
+PRINCIPAL PERMISSIONS:
+  - View all content (any teacher, any status)
+  - View pending content
+  - Approve or reject content with reason
+  - Access global analytics
+
+TEACHER PERMISSIONS:
+  - Upload content (own)
+  - View own content
+  - View own analytics
+  - Delete own content
+
+PUBLIC (no auth):
+  - GET /content/live/:teacherId — the student endpoint
+
+Security extras:
+  - authRateLimit: 10 login attempts per 15 minutes
+  - Passwords hashed with bcrypt (12 rounds)
+  - JWT_SECRET enforced ≥ 32 chars at startup
+
+
+─────────────────────────────────────────────────────────
+2. SUBJECT-BASED SYSTEM DESIGN
+─────────────────────────────────────────────────────────
+
+Each teacher has independent "slots" per subject:
+  - ContentSlot: unique(subject, teacherId)
+  - Think of a slot as a broadcast channel for a subject
+
+ContentSchedule links content to a slot with:
+  - rotationOrder (position in the rotation)
+  - duration (how many minutes this item is shown)
+
+Why subjects are independent:
+  - Maths content does NOT interfere with Science rotation
+  - Each student asking for Maths gets Maths-cycle state
+  - The /content/live endpoint can optionally filter by ?subject=
+
+
+─────────────────────────────────────────────────────────
+3. UPLOAD HANDLING APPROACH
+─────────────────────────────────────────────────────────
+
+LOCAL STORAGE (default):
+  - multer with diskStorage
+  - Files stored in /uploads/<uuid>.<ext>
+  - UUID filenames prevent collisions and enumeration attacks
+  - Static middleware serves /uploads/* publicly
+
+VALIDATION (upload.middleware.ts):
+  - MIME type checked: image/jpeg, image/png, image/gif
+  - Extension checked: .jpg, .jpeg, .png, .gif (double check)
+  - File size: configurable via MAX_FILE_SIZE (default 10MB)
+  - multer FileFilterCallback rejects invalid files before saving
+
+S3 STORAGE (bonus, opt-in via USE_S3=true):
+  - After multer saves locally, uploadToS3() uploads to AWS
+  - Key: content/<uuid>.<ext>
+  - Returns the public S3 URL stored in content.file_url
+  - Local copy retained (or can be deleted post-upload)
+  - getSignedDownloadUrl() can generate expiring access URLs
+
+CONTENT CREATION FLOW:
+  1. Teacher POSTs /api/content/upload (multipart/form-data)
+  2. multer validates and saves file locally
+  3. uploadContentSchema (Zod) validates text fields
+  4. If USE_S3=true: upload to S3, get public URL
+  5. Prisma transaction:
+     a. Create content record (status=pending)
+     b. Upsert ContentSlot for teacher+subject
+     c. If rotationDuration given: create ContentSchedule
+  6. Redis cache for this teacher's live content invalidated
+
+
+─────────────────────────────────────────────────────────
+4. APPROVAL WORKFLOW DESIGN
+─────────────────────────────────────────────────────────
+
+STATE MACHINE:
+  uploaded → pending → approved
+                   └──→ rejected (with reason)
+
+  Note: 'uploaded' and 'pending' are effectively the same step
+  (content is set to 'pending' immediately on upload for clarity).
+
+PRINCIPAL ACTIONS (PATCH /api/content/:id/review):
+  action: "approve"
+    - Sets status = 'approved'
+    - Sets approvedById = principal's id
+    - Sets approvedAt = now()
+    - Clears rejectionReason
+
+  action: "reject"
+    - Sets status = 'rejected'
+    - Sets rejectionReason (required, validated by Zod)
+
+POST-APPROVAL:
+  - Redis cache for that teacher is invalidated
+  - Approved content becomes eligible for live broadcasting
+    (but only within the teacher's configured time window)
+
+CONSTRAINTS:
+  - Only principal role can call this endpoint (RBAC)
+  - Can only review content in 'pending' status (idempotency guard)
+  - Rejection reason is mandatory when rejecting (Zod refine)
+
+
+─────────────────────────────────────────────────────────
+5. SCHEDULING / ROTATION LOGIC (VERY IMPORTANT)
+─────────────────────────────────────────────────────────
+
+PRECONDITIONS FOR CONTENT TO GO LIVE:
+  1. status = 'approved'
+  2. startTime IS NOT NULL
+  3. startTime <= NOW()
+  4. endTime IS NOT NULL
+  5. endTime >= NOW()
+
+If any condition fails → content is not shown (edge case handled).
+
+ROTATION ALGORITHM (SchedulingService.determineActiveContent):
+
+  Step 1 — Sort items by rotationOrder from ContentSchedule
+           (fallback: by creation order if no schedule)
+
+  Step 2 — Find EPOCH:
+           epoch = MIN(startTime) across all live content in subject
+
+  Step 3 — Compute elapsed:
+           elapsedMs = NOW - epoch
+           elapsedMinutes = floor(elapsedMs / 60000)
+
+  Step 4 — Assign durations:
+           Each item's duration = contentSchedule.duration
+           OR content.rotationDuration OR default 5 minutes
+
+  Step 5 — Build rotation cycle:
+           totalCycle = sum of all item durations (minutes)
+
+  Step 6 — Find position in cycle:
+           position = elapsedMinutes % totalCycle
+
+  Step 7 — Walk through items:
+           accumulated = 0
+           for each item:
+             accumulated += item.duration
+             if position < accumulated → THIS item is active
+
+EXAMPLE (3 content items, Maths, teacher-1):
+
+  Content A — 5 min
+  Content B — 5 min
+  Content C — 10 min
+
+  totalCycle = 20 minutes
+
+  elapsedMinutes=0   → position=0  → A (0 < 5)
+  elapsedMinutes=5   → position=5  → B (5 < 10)
+  elapsedMinutes=10  → position=10 → C (10 < 20)
+  elapsedMinutes=20  → position=0  → A (loop restarts!)
+  elapsedMinutes=25  → position=5  → B
+  ...and so on continuously.
+
+SUBJECT INDEPENDENCE:
+  - The loop above runs SEPARATELY per subject
+  - Science rotation state is independent of Maths
+  - getLiveContent() returns one active item PER subject
+    (or filtered to one subject if ?subject= is used)
+
+ANALYTICS:
+  - Each call to getLiveContent() that finds a result
+    increments viewCount in ContentAnalytics (upsert by content+date)
+  - This is fire-and-forget (does not block the response)
+
+
+─────────────────────────────────────────────────────────
+6. DATABASE DESIGN DECISIONS
+─────────────────────────────────────────────────────────
+
+users
+  - Stores both principals and teachers (role field discriminates)
+  - email is unique index
+  - passwordHash stored, never plaintext
+
+content
+  - uploaded_by FK → users (teacher)
+  - approved_by FK → users (principal), nullable
+  - file_path: local disk path
+  - file_url: S3 URL (nullable, populated only when USE_S3=true)
+  - start_time / end_time: nullable; both must be non-null for live
+  - rotation_duration: per-item override for rotation
+  - status: enum (uploaded|pending|approved|rejected)
+
+content_slots
+  - Unique per (subject, teacher_id)
+  - Acts as a "channel" for a teacher's subject broadcast
+  - Created automatically on first upload for that subject
+
+content_schedules
+  - Links content → slot with an explicit rotation_order and duration
+  - Allows fine-grained control: slot A rotates every 5 min, slot B every 10
+  - If missing, falls back to content.rotation_duration or default 5 min
+
+content_analytics
+  - One row per (content_id, date) — daily aggregation
+  - Upserted on each live view (fire-and-forget)
+  - Enables: most active subject, daily trends, per-teacher summaries
+
+INDEXES (implicit via Prisma):
+  - users.email (unique)
+  - content.uploaded_by_id
+  - content.status
+  - content_slots.unique(subject, teacher_id)
+  - content_analytics.unique(content_id, date)
+
+
+─────────────────────────────────────────────────────────
+7. FOLDER STRUCTURE
+─────────────────────────────────────────────────────────
+
+content-broadcasting-system/
+├── prisma/
+│   ├── schema.prisma        — DB schema (Prisma ORM)
+│   └── seed.ts              — Seed users for local dev
+├── src/
+│   ├── config/
+│   │   └── env.ts           — Zod-validated env vars
+│   ├── docs/
+│   │   └── swagger.ts       — Swagger/OpenAPI definition
+│   ├── lib/
+│   │   ├── prisma.ts        — Singleton Prisma client
+│   │   ├── redis.ts         — Redis client + cache helpers
+│   │   └── s3.ts            — AWS S3 upload/delete helpers
+│   ├── middlewares/
+│   │   ├── auth.middleware.ts    — JWT verification
+│   │   ├── error.middleware.ts   — Global error handler
+│   │   ├── rateLimit.middleware.ts — Rate limiters
+│   │   ├── rbac.middleware.ts    — Role-based access control
+│   │   ├── upload.middleware.ts  — Multer file upload
+│   │   └── validate.middleware.ts — Zod request validation
+│   ├── modules/             — Feature-based modules
+│   │   ├── auth/            — Register, Login, GetMe
+│   │   ├── content/         — Upload, Approve, CRUD
+│   │   ├── broadcasting/    — Public /content/live endpoint
+│   │   ├── scheduling/      — Rotation logic & slot info
+│   │   ├── analytics/       — Views, active subjects
+│   │   └── users/           — User lookup
+│   ├── common/
+│   │   ├── asyncHandler.ts  — Wraps async controllers
+│   │   └── errors.ts        — Custom error classes
+│   ├── routes/
+│   │   └── index.ts         — Mounts all module routes
+│   ├── types/
+│   │   └── express.d.ts     — Augments Request with req.user
+│   ├── app.ts               — Express app setup
+│   └── server.ts            — Entry point, graceful shutdown
+├── tests/
+│   ├── globalSetup.cjs      — Jest env setup
+│   ├── health.test.ts       — Health endpoint test
+│   └── integration/
+│       └── app.integration.test.ts — Auth + flow tests
+├── uploads/                 — Local file storage (gitignored)
+├── .env.example             — Template for .env
+├── Dockerfile               — Multi-stage production image
+├── docker-compose.yml       — App + Postgres + Redis
+├── jest.config.ts
+├── package.json
+├── tsconfig.json
+├── README.md
+└── architecture-notes.txt   ← this file
+
+
+─────────────────────────────────────────────────────────
+8. MIDDLEWARE USAGE
+─────────────────────────────────────────────────────────
+
+REQUEST PIPELINE ORDER:
+  helmet()          → Security headers (CSP, XSS, etc.)
+  cors()            → Cross-origin control
+  compression()     → gzip responses
+  morgan()          → Request logging (dev only)
+  globalRateLimit   → 100 req/15min per IP (all routes)
+  express.json()    → Body parsing
+  router            → Route matching
+    ├── authenticate → JWT verification (protected routes only)
+    ├── authorize    → Role check (after authenticate)
+    ├── validate     → Zod schema validation
+    ├── uploadSingle → Multer (upload route only)
+    └── controller   → Business logic
+  errorHandler      → Catches all thrown errors
+  notFoundHandler   → 404 for unmatched routes
+
+RATE LIMITING LAYERS:
+  globalRateLimit      → 100/15min (all routes)
+  authRateLimit        → 10/15min (login/register only)
+  publicApiRateLimit   → 30/15min (GET /content/live/:id)
+
+
+─────────────────────────────────────────────────────────
+9. SCALABILITY APPROACH
+─────────────────────────────────────────────────────────
+
+CACHING (Redis):
+  - /content/live responses cached with key: live:<teacherId>:<subject>
+  - TTL configurable (default 60s) — students get near-real-time data
+  - Cache invalidated on: content upload, content approval/rejection
+  - Graceful degradation: if Redis is down, requests hit DB directly
+  - Cache miss rate is low once content is approved and stable
+
+RATE LIMITING:
+  - Per-IP rate limits prevent abuse of public endpoint
+  - Auth endpoint has stricter limits to prevent brute-force
+
+DATABASE:
+  - Prisma with connection pooling (PgBouncer-ready)
+  - All list queries are paginated (page + limit)
+  - Indexes on frequently filtered columns (status, uploaded_by_id)
+  - ContentAnalytics uses daily upsert to keep analytics table small
+  - $transaction used for multi-step writes (upload + slot + schedule)
+
+FUTURE SCALING (production roadmap):
+  - Horizontal scaling: app is stateless (JWT), multiple instances ok
+  - Redis Cluster for distributed caching across instances
+  - Bull/BullMQ for async analytics tracking (remove fire-and-forget risk)
+  - CDN (CloudFront) in front of S3 for media delivery
+  - Read replicas for analytics queries
+  - Database: add composite indexes as query patterns grow
+  - Event-driven: Kafka/SQS for content approval notifications
+
+DOCKER:
+  - Multi-stage Dockerfile: builder + lean production image
+  - Non-root user for security
+  - dumb-init for proper signal handling (graceful shutdown)
+  - Health checks on all services
+  - Named volumes for persistent storage
+
+=========================================================
