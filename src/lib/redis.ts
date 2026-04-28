@@ -5,7 +5,14 @@ let redisClient: ReturnType<typeof createClient> | null = null;
 
 export async function getRedisClient() {
   if (!redisClient) {
-    redisClient = createClient({ url: env.REDIS_URL });
+    // redisClient = createClient({ url: env.REDIS_URL });
+    redisClient = createClient({
+        url: env.REDIS_URL,
+        socket: {
+            tls: env.NODE_ENV === 'production', 
+            reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
+          },
+      });
 
     redisClient.on('error', (err) => {
       console.error('Redis error:', err.message);
