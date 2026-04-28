@@ -1,6 +1,9 @@
 import swaggerJsdoc from 'swagger-jsdoc';
 import { env } from '../config/env';
 
+
+const isProd = env.NODE_ENV === 'production';
+
 const options: swaggerJsdoc.Options = {
   definition: {
     openapi: '3.0.0',
@@ -113,7 +116,11 @@ modular arithmetic from the earliest \`startTime\` as the epoch.
       { name: 'Users', description: 'User management' },
     ],
   },
-  apis: ['./src/modules/**/*.route.ts', './src/routes/*.ts'],
+//   apis: ['./src/modules/**/*.route.ts', './src/routes/*.ts'],
+apis: isProd
+    ? ['./dist/modules/**/*.route.js', './dist/routes/*.js']  // production
+    : ['./src/modules/**/*.route.ts', './src/routes/*.ts'],   // local
+
 };
 
 export const swaggerSpec = swaggerJsdoc(options);
