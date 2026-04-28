@@ -47,6 +47,15 @@ if (env.NODE_ENV !== 'production') {
   app.get('/api/docs.json', (_req, res) => res.json(swaggerSpec));
 }
 
+
+// ── Health / Root route ───────────────────────────────────────────
+app.get("/", (_req, res) => {
+    res.status(200).json({
+      status: "success",
+      message: "🚀 Content Broadcasting API is running",
+    });
+  });
+
 // ── Application routes ───────────────────────────────────────────────────
 app.use(routes);
 
