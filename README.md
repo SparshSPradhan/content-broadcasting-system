@@ -4,6 +4,18 @@ A production-ready backend for broadcasting educational content from teachers to
 
 ---
 
+
+## 🌐 Live Demo
+
+* 🚀 **Live API:**
+  https://content-broadcasting-system-njdf.onrender.com
+
+* 📄 **API Documentation (Swagger):**
+  https://content-broadcasting-system-njdf.onrender.com/api/docs
+
+> ⚠️ Note: Swagger docs are enabled via environment flag (`ENABLE_DOCS=true`) for evaluation purposes.
+
+
 ## 🧰 Tech Stack
 
 | Layer | Technology |
