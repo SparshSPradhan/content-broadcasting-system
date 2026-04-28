@@ -39,7 +39,7 @@ app.use(globalRateLimit);
 app.use('/uploads', express.static(path.resolve(env.UPLOAD_DIR)));
 
 // ── Swagger docs ─────────────────────────────────────────────────────────
-if (env.NODE_ENV !== 'production') {
+if (env.NODE_ENV !== 'production' || env.ENABLE_DOCS ) {
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
     customCss: '.swagger-ui .topbar { display: none }',
     customSiteTitle: 'CBS API Docs',
