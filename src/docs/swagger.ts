@@ -36,15 +36,14 @@ modular arithmetic from the earliest \`startTime\` as the epoch.
       },
     },
     servers: [
-      {
-        url: `http://localhost:${env.PORT}`,
-        description: 'Development server',
-      },
-      {
-        url: 'https://your-production-domain.com',
-        description: 'Production server',
-      },
-    ],
+        {
+          url: isProd
+            ? 'https://content-broadcasting-system-njdf.onrender.com'
+            : `http://localhost:${env.PORT}`,
+          description: isProd ? 'Production server' : 'Development server',
+        },
+      ],
+      
     components: {
       securitySchemes: {
         bearerAuth: {
